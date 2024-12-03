@@ -3,7 +3,7 @@ from math import exp, sqrt, log
 from random import random_float64
 from utils.index import Index
 from memory import memset_zero
-
+from time import time
 alias INPUT_SIZE = 784
 alias HIDDEN_SIZE = 256
 alias OUTPUT_SIZE = 10
@@ -19,7 +19,7 @@ alias TRAIN_IMG_PATH = "data/train-images.idx3-ubyte"
 alias TRAIN_LBL_PATH = "data/train-labels.idx1-ubyte"
 alias RAND_MAX = 32767
 
-
+@value
 struct Layer:
     var weights: UnsafePointer[Float32]
     var biases: UnsafePointer[Float32]
@@ -51,7 +51,7 @@ struct Layer:
             self.biases[i] = 0.0
             self.bias_momentum[i] = 0.0
 
-
+@value
 struct Network:
     var hidden: Layer
     var output: Layer
@@ -61,6 +61,7 @@ struct Network:
         self.output = Layer(HIDDEN_SIZE, OUTPUT_SIZE)
 
 
+@always_inline
 fn format(content: List[UInt8]) -> UInt32:
     var number: UInt32 = 0
     # Combine 4 bytes into a 32-bit integer using bitwise operations
@@ -71,6 +72,7 @@ fn format(content: List[UInt8]) -> UInt32:
     return number
 
 
+@always_inline
 fn softmax(input: UnsafePointer[Float32], size: Int):
     var max_val = input[0]
     for i in range(1, size):
@@ -86,14 +88,17 @@ fn softmax(input: UnsafePointer[Float32], size: Int):
         input[i] = input[i] / sum_exp
 
 
+@always_inline
 fn relu(x: Float32) -> Float32:
     return max(0, x)
 
 
+@always_inline
 fn relu_derivative(x: Float32) -> Float32:
     return 1 if x > 0 else 0
 
 
+@always_inline
 fn forward(
     network: Network,
     input: UnsafePointer[Float32],
@@ -123,6 +128,7 @@ fn forward(
     softmax(final_output, OUTPUT_SIZE)
 
 
+@always_inline
 fn backward(
     inout network: Network,
     input: UnsafePointer[Float32],
@@ -130,91 +136,85 @@ fn backward(
     final_output: UnsafePointer[Float32],
     label: Int,
 ) raises:
-    try:
-        # Validate input parameters
-        # if label < 0 or label >= OUTPUT_SIZE:
-        #     print("Invalid label:", label)
-        #     return
 
-        # Allocate and initialize gradients
-        var output_gradients = UnsafePointer[Float32].alloc(OUTPUT_SIZE)
-        var hidden_gradients = UnsafePointer[Float32].alloc(HIDDEN_SIZE)
 
-        # Initialize gradients to zero
-        memset_zero(output_gradients.bitcast[UInt8](), OUTPUT_SIZE * 4)
-        memset_zero(hidden_gradients.bitcast[UInt8](), HIDDEN_SIZE * 4)
+    # Allocate and initialize gradients
+    var output_gradients = UnsafePointer[Float32].alloc(OUTPUT_SIZE)
+    var hidden_gradients = UnsafePointer[Float32].alloc(HIDDEN_SIZE)
 
-        # Output layer gradients (softmax derivative)
-        for i in range(OUTPUT_SIZE):
-            output_gradients[i] = final_output[i]
-        output_gradients[label] -= 1.0
+    # Initialize gradients to zero
+    memset_zero(output_gradients.bitcast[UInt8](), OUTPUT_SIZE * 4)
+    memset_zero(hidden_gradients.bitcast[UInt8](), HIDDEN_SIZE * 4)
 
-        # Hidden layer gradients
-        for i in range(HIDDEN_SIZE):
-            var sum: Float32 = 0.0
-            for j in range(OUTPUT_SIZE):
-                sum += (
-                    network.output.weights[j * HIDDEN_SIZE + i]
-                    * output_gradients[j]
-                )
-            hidden_gradients[i] = sum * relu_derivative(hidden_output[i])
+    # Output layer gradients (softmax derivative)
+    for i in range(OUTPUT_SIZE):
+        output_gradients[i] = final_output[i]
+    output_gradients[label] -= 1.0
 
-        # Update output layer weights and biases
-        for i in range(OUTPUT_SIZE):
-            for j in range(HIDDEN_SIZE):
-                var idx = i * HIDDEN_SIZE + j
-                var grad = output_gradients[i] * hidden_output[j]
-                # Clip gradients
-                grad = min(max(grad, -1.0), 1.0)
-
-                # Update momentum and weights
-                network.output.weight_momentum[idx] = (
-                    MOMENTUM * network.output.weight_momentum[idx]
-                    - LEARNING_RATE * grad
-                )
-                network.output.weights[idx] += network.output.weight_momentum[
-                    idx
-                ]
-
-            # Update output biases
-            network.output.bias_momentum[i] = (
-                MOMENTUM * network.output.bias_momentum[i]
-                - LEARNING_RATE * output_gradients[i]
+    # Hidden layer gradients
+    for i in range(HIDDEN_SIZE):
+        var sum: Float32 = 0.0
+        for j in range(OUTPUT_SIZE):
+            sum += (
+                network.output.weights[j * HIDDEN_SIZE + i]
+                * output_gradients[j]
             )
-            network.output.biases[i] += network.output.bias_momentum[i]
+        hidden_gradients[i] = sum * relu_derivative(hidden_output[i])
 
-        # Update hidden layer weights and biases
-        for i in range(HIDDEN_SIZE):
-            for j in range(INPUT_SIZE):
-                var idx = i * INPUT_SIZE + j
-                var grad = hidden_gradients[i] * input[j]
-                # Clip gradients
-                grad = min(max(grad, -1.0), 1.0)
+    # Update output layer weights and biases
+    for i in range(OUTPUT_SIZE):
+        for j in range(HIDDEN_SIZE):
+            var idx = i * HIDDEN_SIZE + j
+            var grad = output_gradients[i] * hidden_output[j]
+            # Clip gradients
+            grad = min(max(grad, -1.0), 1.0)
 
-                # Update momentum and weights
-                network.hidden.weight_momentum[idx] = (
-                    MOMENTUM * network.hidden.weight_momentum[idx]
-                    - LEARNING_RATE * grad
-                )
-                network.hidden.weights[idx] += network.hidden.weight_momentum[
-                    idx
-                ]
-
-            # Update hidden biases
-            network.hidden.bias_momentum[i] = (
-                MOMENTUM * network.hidden.bias_momentum[i]
-                - LEARNING_RATE * hidden_gradients[i]
+            # Update momentum and weights
+            network.output.weight_momentum[idx] = (
+                MOMENTUM * network.output.weight_momentum[idx]
+                - LEARNING_RATE * grad
             )
-            network.hidden.biases[i] += network.hidden.bias_momentum[i]
+            network.output.weights[idx] += network.output.weight_momentum[
+                idx
+            ]
 
-        # Free allocated memory
-        output_gradients.free()
-        hidden_gradients.free()
+        # Update output biases
+        network.output.bias_momentum[i] = (
+            MOMENTUM * network.output.bias_momentum[i]
+            - LEARNING_RATE * output_gradients[i]
+        )
+        network.output.biases[i] += network.output.bias_momentum[i]
 
-    except:
-        print("Error in backward pass")
+    # Update hidden layer weights and biases
+    for i in range(HIDDEN_SIZE):
+        for j in range(INPUT_SIZE):
+            var idx = i * INPUT_SIZE + j
+            var grad = hidden_gradients[i] * input[j]
+            # Clip gradients
+            grad = min(max(grad, -1.0), 1.0)
+
+            # Update momentum and weights
+            network.hidden.weight_momentum[idx] = (
+                MOMENTUM * network.hidden.weight_momentum[idx]
+                - LEARNING_RATE * grad
+            )
+            network.hidden.weights[idx] += network.hidden.weight_momentum[
+                idx
+            ]
+
+        # Update hidden biases
+        network.hidden.bias_momentum[i] = (
+            MOMENTUM * network.hidden.bias_momentum[i]
+            - LEARNING_RATE * hidden_gradients[i]
+        )
+        network.hidden.biases[i] += network.hidden.bias_momentum[i]
+
+    # Free allocated memory
+    output_gradients.free()
+    hidden_gradients.free()
 
 
+@always_inline
 fn train_batch(
     inout network: Network,
     images: UnsafePointer[UInt8],
@@ -235,6 +235,7 @@ fn train_batch(
             memset_zero(final_output.bitcast[UInt8](), OUTPUT_SIZE * 4)
 
             # Load and normalize input
+            @parameter
             for i in range(INPUT_SIZE):
                 var idx = b * INPUT_SIZE + i
                 input[i] = images[idx].cast[DType.float32]() / 255.0
@@ -255,6 +256,7 @@ fn train_batch(
         final_output.free()
 
 
+@always_inline
 fn load_mnist_data() raises -> (
     Tuple[UnsafePointer[UInt8], UnsafePointer[UInt8], Int]
 ):
@@ -277,17 +279,6 @@ fn load_mnist_data() raises -> (
         print("Dimensions:", rows, "x", cols)
         print("Found", num_images, "images and", num_labels, "labels")
 
-        # Validate file format
-        # if magic != 2051 or label_magic != 2049:
-        #     print("Invalid MNIST file format")
-        #     return (UnsafePointer[UInt8].alloc(0), UnsafePointer[UInt8].alloc(0), 0)
-
-        # # Validate dimensions
-        # if rows != IMAGE_SIZE or cols != IMAGE_SIZE:
-        #     print("Invalid image dimensions")
-        #     return (UnsafePointer[UInt8].alloc(0), UnsafePointer[UInt8].alloc(0), 0)
-
-        # Validate matching counts
         if num_images != num_labels:
             print("Mismatch between number of images and labels")
             return (
@@ -332,6 +323,7 @@ fn load_mnist_data() raises -> (
         return (UnsafePointer[UInt8].alloc(0), UnsafePointer[UInt8].alloc(0), 0)
 
 
+@always_inline
 fn evaluate(
     network: Network,
     images: UnsafePointer[UInt8],
@@ -349,12 +341,12 @@ fn evaluate(
     memset_zero(input.bitcast[UInt8](), INPUT_SIZE * 4)
     memset_zero(hidden_output.bitcast[UInt8](), HIDDEN_SIZE * 4)
     memset_zero(final_output.bitcast[UInt8](), OUTPUT_SIZE * 4)
-
     for i in range(num_images):
         # Clear input buffer
         memset_zero(input.bitcast[UInt8](), INPUT_SIZE * 4)
 
         # Normalize input
+        @parameter
         for j in range(INPUT_SIZE):
             input[j] = images[i * INPUT_SIZE + j].cast[DType.float32]() / 255.0
 
@@ -363,11 +355,11 @@ fn evaluate(
         # Find predicted class
         var max_idx = 0
         var max_val = final_output[0]
+        @parameter
         for j in range(1, OUTPUT_SIZE):
             if final_output[j] > max_val:
                 max_val = final_output[j]
                 max_idx = j
-
         if max_idx == labels[i].cast[DType.int32]().value:
             correct += 1
 
@@ -395,7 +387,7 @@ fn main() raises:
 
     for epoch in range(EPOCHS):
         print("\nEpoch", epoch + 1, "/", EPOCHS)
-
+        var start_time = time.now()
         # Training phase
         for batch_start in range(0, train_size, BATCH_SIZE):
             var current_batch_size = min(BATCH_SIZE, train_size - batch_start)
@@ -427,8 +419,14 @@ fn main() raises:
             labels.offset(train_size),
             val_size,
         )
+        var end_time = time.now()
         print(
-            "Epoch", epoch + 1, "complete. Validation accuracy:", epoch_accuracy
+            "Epoch",
+            epoch + 1,
+            "complete. Validation accuracy:",
+            epoch_accuracy,
+            "Time taken:",
+            (end_time - start_time) / 1000000000.0,
         )
 
     print("\nTraining complete!")
