@@ -4,10 +4,13 @@ from random import random_float64
 from utils.index import Index
 from memory import memset_zero
 from time import time
+from sys import simdwidthof
+from algorithm.functional import vectorize
+
 alias INPUT_SIZE = 784
 alias HIDDEN_SIZE = 256
 alias OUTPUT_SIZE = 10
-alias LEARNING_RATE = 0.001
+alias LEARNING_RATE = 0.002
 alias MOMENTUM = 0.9
 alias EPOCHS = 20
 alias BATCH_SIZE = 64
@@ -18,6 +21,9 @@ alias RANDON_INT = 223
 alias TRAIN_IMG_PATH = "data/train-images.idx3-ubyte"
 alias TRAIN_LBL_PATH = "data/train-labels.idx1-ubyte"
 alias RAND_MAX = 32767
+
+alias simd_width = simdwidthof[DType.float32]()
+
 
 @value
 struct Layer:
@@ -50,6 +56,7 @@ struct Layer:
         for i in range(self.output_size):
             self.biases[i] = 0.0
             self.bias_momentum[i] = 0.0
+
 
 @value
 struct Network:
@@ -111,18 +118,24 @@ fn forward(
 
     # Hidden layer
     for i in range(HIDDEN_SIZE):
-        var sum: Float32 = 0.0
-        for j in range(INPUT_SIZE):
-            sum += network.hidden.weights[i * INPUT_SIZE + j] * input[j]
-        hidden_output[i] = relu(sum + network.hidden.biases[i])
+        var sum1: Float32 = 0.0
+        for j in range(0, INPUT_SIZE, int(simd_width)):
+            var weights = network.hidden.weights.offset(
+                i * INPUT_SIZE + j
+            ).load[width=simd_width]()
+            var inputs = input.offset(j).load[width=simd_width]()
+            sum1 += (weights * inputs).reduce_add()
+        hidden_output[i] = relu(sum1 + network.hidden.biases[i])
 
     # Output layer
     for i in range(OUTPUT_SIZE):
         var sum: Float32 = 0.0
-        for j in range(HIDDEN_SIZE):
-            sum += (
-                network.output.weights[i * HIDDEN_SIZE + j] * hidden_output[j]
-            )
+        for j in range(0, HIDDEN_SIZE, int(simd_width)):
+            var weights = network.output.weights.offset(
+                i * HIDDEN_SIZE + j
+            ).load[width=simd_width]()
+            var inputs = hidden_output.offset(j).load[width=simd_width]()
+            sum += (weights * inputs).reduce_add()
         final_output[i] = sum + network.output.biases[i]
 
     softmax(final_output, OUTPUT_SIZE)
@@ -136,8 +149,6 @@ fn backward(
     final_output: UnsafePointer[Float32],
     label: Int,
 ) raises:
-
-
     # Allocate and initialize gradients
     var output_gradients = UnsafePointer[Float32].alloc(OUTPUT_SIZE)
     var hidden_gradients = UnsafePointer[Float32].alloc(HIDDEN_SIZE)
@@ -152,6 +163,7 @@ fn backward(
     output_gradients[label] -= 1.0
 
     # Hidden layer gradients
+    @parameter
     for i in range(HIDDEN_SIZE):
         var sum: Float32 = 0.0
         for j in range(OUTPUT_SIZE):
@@ -162,10 +174,14 @@ fn backward(
         hidden_gradients[i] = sum * relu_derivative(hidden_output[i])
 
     # Update output layer weights and biases
+    @parameter
     for i in range(OUTPUT_SIZE):
-        for j in range(HIDDEN_SIZE):
+        for j in range(0, HIDDEN_SIZE, int(simd_width)):
             var idx = i * HIDDEN_SIZE + j
-            var grad = output_gradients[i] * hidden_output[j]
+            var grad = (
+                output_gradients[i]
+                * hidden_output.offset(j).load[width=simd_width]()
+            ).reduce_add()
             # Clip gradients
             grad = min(max(grad, -1.0), 1.0)
 
@@ -174,9 +190,7 @@ fn backward(
                 MOMENTUM * network.output.weight_momentum[idx]
                 - LEARNING_RATE * grad
             )
-            network.output.weights[idx] += network.output.weight_momentum[
-                idx
-            ]
+            network.output.weights[idx] += network.output.weight_momentum[idx]
 
         # Update output biases
         network.output.bias_momentum[i] = (
@@ -186,21 +200,30 @@ fn backward(
         network.output.biases[i] += network.output.bias_momentum[i]
 
     # Update hidden layer weights and biases
+    @parameter
     for i in range(HIDDEN_SIZE):
-        for j in range(INPUT_SIZE):
+        for j in range(0, INPUT_SIZE, int(simd_width)):
             var idx = i * INPUT_SIZE + j
-            var grad = hidden_gradients[i] * input[j]
+            var grad = (
+                hidden_gradients[i] * input.offset(j).load[width=simd_width]()
+            ).reduce_add()
             # Clip gradients
             grad = min(max(grad, -1.0), 1.0)
 
             # Update momentum and weights
-            network.hidden.weight_momentum[idx] = (
-                MOMENTUM * network.hidden.weight_momentum[idx]
+            network.hidden.weight_momentum.offset(idx).store[width=simd_width](
+                MOMENTUM
+                * network.hidden.weight_momentum.offset(idx).load[
+                    width=simd_width
+                ]()
                 - LEARNING_RATE * grad
             )
-            network.hidden.weights[idx] += network.hidden.weight_momentum[
-                idx
-            ]
+            network.hidden.weights.offset(idx).store[width=simd_width](
+                network.hidden.weights.offset(idx).load[width=simd_width]()
+                + network.hidden.weight_momentum.offset(idx).load[
+                    width=simd_width
+                ]()
+            )
 
         # Update hidden biases
         network.hidden.bias_momentum[i] = (
@@ -236,9 +259,14 @@ fn train_batch(
 
             # Load and normalize input
             @parameter
-            for i in range(INPUT_SIZE):
+            for i in range(0, INPUT_SIZE, simd_width):
                 var idx = b * INPUT_SIZE + i
-                input[i] = images[idx].cast[DType.float32]() / 255.0
+                input.offset(i).store[width=simd_width](
+                    images.offset(idx)
+                    .load[width=simd_width]()
+                    .cast[DType.float32]()
+                    / 255.0
+                )
 
             # Forward pass
             forward(network, input, hidden_output, final_output)
@@ -347,14 +375,21 @@ fn evaluate(
 
         # Normalize input
         @parameter
-        for j in range(INPUT_SIZE):
-            input[j] = images[i * INPUT_SIZE + j].cast[DType.float32]() / 255.0
+        for j in range(0, INPUT_SIZE, simd_width):
+            var idx = i * INPUT_SIZE + j
+            input.offset(j).store[width=simd_width](
+                images.offset(idx)
+                .load[width=simd_width]()
+                .cast[DType.float32]()
+                / 255.0
+            )
 
         forward(network, input, hidden_output, final_output)
 
         # Find predicted class
         var max_idx = 0
         var max_val = final_output[0]
+
         @parameter
         for j in range(1, OUTPUT_SIZE):
             if final_output[j] > max_val:
